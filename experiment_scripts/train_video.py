@@ -34,6 +34,7 @@ p.add_argument('--dataset', type=str, default='bikes',
 p.add_argument('--model_type', type=str, default='sine',
                help='Options currently are "sine" (all sine activations), "relu" (all relu activations,'
                     '"nerf" (relu activations and positional encoding as in NeRF), "rbf" (input rbf layer, rest relu)')
+p.add_argument('--sparse_type', type=str, default='none')                    
 p.add_argument('--sample_frac', type=float, default=38e-4,
                help='What fraction of video pixels to sample in each batch (default is all)')
 
@@ -52,7 +53,7 @@ dataloader = DataLoader(coord_dataset, shuffle=True, batch_size=opt.batch_size, 
 # Define the model.
 if opt.model_type == 'sine' or opt.model_type == 'relu' or opt.model_type == 'tanh':
     model = modules.SingleBVPNet(type=opt.model_type, in_features=3, out_features=vid_dataset.channels,
-                                 mode='mlp', hidden_features=1024, num_hidden_layers=3)
+                                 mode='mlp', hidden_features=1024, num_hidden_layers=3, sparse_matrix=opt.sparse_type)
 elif opt.model_type == 'rbf' or opt.model_type == 'nerf':
     model = modules.SingleBVPNet(type='relu', in_features=3, out_features=vid_dataset.channels, mode=opt.model_type)
 else:

@@ -15,7 +15,7 @@ import torch
 from PIL import Image
 from torch.utils.data import Dataset
 from torchvision.transforms import Resize, Compose, ToTensor, Normalize
-
+import pdb
 
 def get_mgrid(sidelen, dim=2):
     '''Generates a flattened grid of (x,y,...) coordinates in a range of -1 to 1.'''
@@ -495,16 +495,16 @@ class ImageFile(Dataset):
 
 
 class CelebA(Dataset):
-    def __init__(self, split, downsampled=False):
+    def __init__(self, split, downsampled=False, resolution=32):
         # SIZE (178 x 218)
         super().__init__()
         assert split in ['train', 'test', 'val'], "Unknown split"
 
-        self.root = '/media/data3/awb/CelebA/kaggle/img_align_celeba/img_align_celeba'
+        self.root = '/home/tackgeun/inr-diff/siren/CelebA/img_align_celeba/img_align_celeba'
         self.img_channels = 3
         self.fnames = []
 
-        with open('/media/data3/awb/CelebA/kaggle/list_eval_partition.csv', newline='') as csvfile:
+        with open('/home/tackgeun/inr-diff/siren/CelebA/list_eval_partition.csv', newline='') as csvfile:
             rowreader = csv.reader(csvfile, delimiter=',', quotechar='|')
             for row in rowreader:
                 if split == 'train' and row[1] == '0':
@@ -515,6 +515,7 @@ class CelebA(Dataset):
                     self.fnames.append(row[0])
 
         self.downsampled = downsampled
+        self.res = resolution
 
     def __len__(self):
         return len(self.fnames)
@@ -531,10 +532,48 @@ class CelebA(Dataset):
             right = (width + s) / 2
             bottom = (height + s) / 2
             img = img.crop((left, top, right, bottom))
-            img = img.resize((32, 32))
+            img = img.resize((self.res, self.res))
 
         return img
 
+class CelebAHQ(Dataset):
+    def __init__(self, split, downsampled=False, resolution=32):
+        # SIZE (128 x 128)
+        super().__init__()
+        assert split in ['train', 'test'], "Unknown split"
+
+        self.root = '/home/tackgeun/inr-diff/functa/celeb_a_hq_custom/data128x128/'
+        self.img_channels = 3
+        self.fnames = []
+
+        if split == 'train':
+            for i in range(1, 27001):
+                self.fnames.append('%05d.jpg' % i)
+        elif split == 'test':
+            for i in range(27001, 30001):
+                self.fnames.append('%05d.jpg' % i)
+
+        self.downsampled = downsampled
+        self.res = resolution
+
+    def __len__(self):
+        return len(self.fnames)
+
+    def __getitem__(self, idx):
+        path = os.path.join(self.root, self.fnames[idx])
+        img = Image.open(path)
+        if self.downsampled:
+            width, height = img.size  # Get dimensions
+
+            # s = min(width, height)
+            # left = (width - s) / 2
+            # top = (height - s) / 2
+            # right = (width + s) / 2
+            # bottom = (height + s) / 2
+            # img = img.crop((left, top, right, bottom))
+            img = img.resize((self.res, self.res))
+
+        return img
 
 class ImplicitAudioWrapper(torch.utils.data.Dataset):
     def __init__(self, dataset):
@@ -575,12 +614,25 @@ class AudioFile(Dataset):
 
 
 class Implicit2DWrapper(torch.utils.data.Dataset):
-    def __init__(self, dataset, sidelength=None, compute_diff=None):
-
-        if isinstance(sidelength, int):
-            sidelength = (sidelength, sidelength)
+    def __init__(self, dataset, sidelength=None, compute_diff=None, istuple=False):
         self.sidelength = sidelength
 
+        # if isinstance(sidelength, int):
+        #     sidelength = (sidelength, sidelength)
+        # self.sidelength = sidelength
+
+        # if istuple:
+        #     self.transform = Compose([Resize((sidelength, sidelength)),
+        #                                     ToTensor(),
+        #                                     Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+        #                                     ])            
+        # else:
+        #     self.transform = Compose([
+        #         Resize(sidelength),
+        #         ToTensor(),
+        #         Normalize(torch.Tensor([0.5]), torch.Tensor([0.5]))
+        #     ])
+        
         self.transform = Compose([
             Resize(sidelength),
             ToTensor(),
@@ -590,12 +642,22 @@ class Implicit2DWrapper(torch.utils.data.Dataset):
         self.compute_diff = compute_diff
         self.dataset = dataset
         self.mgrid = get_mgrid(sidelength)
+        self.istuple = istuple
+
+        if hasattr(dataset, 'img_channels'):
+            self.img_channels = self.dataset.img_channels
+        else:
+            self.img_channels = 3
 
     def __len__(self):
         return len(self.dataset)
 
     def __getitem__(self, idx):
-        img = self.transform(self.dataset[idx])
+        if self.istuple:
+            data = self.dataset[idx]
+            img = self.transform(data[0])
+        else:
+            img = self.transform(self.dataset[idx])
 
         if self.compute_diff == 'gradients':
             img *= 1e1
@@ -609,7 +671,7 @@ class Implicit2DWrapper(torch.utils.data.Dataset):
             grady = scipy.ndimage.sobel(img.numpy(), axis=2).squeeze(0)[..., None]
             laplace = scipy.ndimage.laplace(img.numpy()).squeeze(0)[..., None]
 
-        img = img.permute(1, 2, 0).view(-1, self.dataset.img_channels)
+        img = img.permute(1, 2, 0).view(-1, self.img_channels)
 
         in_dict = {'idx': idx, 'coords': self.mgrid}
         gt_dict = {'img': img}
@@ -635,7 +697,7 @@ class Implicit2DWrapper(torch.utils.data.Dataset):
     def get_item_small(self, idx):
         img = self.transform(self.dataset[idx])
         spatial_img = img.clone()
-        img = img.permute(1, 2, 0).view(-1, self.dataset.img_channels)
+        img = img.permute(1, 2, 0).view(-1, self.img_channels)
 
         gt_dict = {'img': img}
 
@@ -733,6 +795,8 @@ class ImageGeneralizationWrapper(torch.utils.data.Dataset):
 
                     in_dict = {'idx': idx, 'coords': self.mgrid, 'img_sub': img_sparse, 'coords_sub': coords_sub,
                                'ctxt_mask': ctxt_mask}
+        elif self.generalization_mode == 'auto-encoder':
+            in_dict = {'idx': idx, 'coords': self.mgrid, 'img_sub': img, 'coords_sub': self.mgrid, 'spatial_img': spatial_img}
         else:
             in_dict = {'idx': idx, 'coords': self.mgrid}
 

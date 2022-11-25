@@ -42,6 +42,7 @@ p.add_argument('--model_type', type=str, default='sine',
 
 p.add_argument('--checkpoint_path', default=None, help='Checkpoint to trained model.')
 
+p.add_argument('--arch_type', type=str, default='')
 p.add_argument('--conv_encoder', action='store_true', default=False, help='Use convolutional encoder process')
 opt = p.parse_args()
 
@@ -59,7 +60,11 @@ image_resolution = (32, 32)
 
 dataloader = DataLoader(generalization_dataset, shuffle=True, batch_size=opt.batch_size, pin_memory=True, num_workers=0)
 
-if opt.conv_encoder:
+if opt.arch_type == 'functa':
+    model = meta_modules.ModulatedImplicit2DHypernet(in_features=img_dataset.img_channels + 2,
+                                                         out_features=img_dataset.img_channels,
+                                                         image_resolution=image_resolution)
+elif opt.arch_type == 'conv_encoder':
     model = meta_modules.ConvolutionalNeuralProcessImplicit2DHypernet(in_features=img_dataset.img_channels,
                                                                       out_features=img_dataset.img_channels,
                                                                       image_resolution=image_resolution)
@@ -67,6 +72,7 @@ else:
     model = meta_modules.NeuralProcessImplicit2DHypernet(in_features=img_dataset.img_channels + 2,
                                                          out_features=img_dataset.img_channels,
                                                          image_resolution=image_resolution)
+
 model.cuda()
 
 # Define the loss

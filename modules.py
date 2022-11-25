@@ -1,12 +1,361 @@
+import math
+import sys
+from collections import OrderedDict
+
+import numpy as np
+import xxhash
 import torch
 from torch import nn
 from torchmeta.modules import (MetaModule, MetaSequential)
 from torchmeta.modules.utils import get_subdict
-import numpy as np
-from collections import OrderedDict
-import math
 import torch.nn.functional as F
 
+#from torch_butterfly import Butterfly
+#from torch_butterfly.permutation import FixedPermutation, bitreversal_permutation
+# sys.path.append('/home/tackgeun/inr-diff/butterfly')
+# from butterfly import Butterfly as ButterflyOld
+# from butterfly.permutation import Permutation as PermutationOld
+
+class LowRankLinear(nn.Module):
+    
+    def __init__(self, in_features, out_features, k=10, bias=True):
+        super(LowRankLinear, self).__init__()
+
+        self.use_bias = bias
+
+        self.in_features = in_features
+        self.out_features = out_features
+        self.k = k
+
+        #  Virtual sizes
+        self.size_w_A = in_features * k
+        self.size_w_B = out_features * k
+        self.size_b = out_features
+
+
+        self.A = nn.Parameter(torch.Tensor(in_features, k))
+        self.B = nn.Parameter(torch.Tensor(k, out_features))
+
+        self.h_bias = nn.Parameter(torch.Tensor(self.size_b))
+
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        stdv = 1. / math.sqrt(self.in_features)
+        nn.init.uniform_(self.A, -stdv, stdv)
+        nn.init.uniform_(self.B, -stdv, stdv)
+        if self.use_bias:
+            nn.init.uniform_(self.h_bias, -stdv, stdv)
+
+    def forward(self, x):
+        return F.linear(x, torch.mm(self.A, self.B), self.h_bias)
+
+
+class HashLinear(nn.Module):
+    '''
+    This layer implements a linear hashed network as in
+     - Chen, W., Wilson, J., Tyree, S., Weinberger, K. and Chen, Y., 2015,
+       Compressing neural networks with the hashing trick.
+       In International Conference on Machine Learning (pp. 2285-2294).
+    It is largely based on the above authors (Lua)Torch implementation:
+    https://www.cse.wustl.edu/~ychen/HashedNets
+    Note that some static hashing parameters are wrapped with
+    `Parameter(..., requires_grad=False)` so that they get sent
+    to device along with the layer. I.e. check for requires_grad
+    when computing total number of parameters.
+    '''
+    def __init__(self, in_features, out_features, compression,
+                 xi=True, hash_bias=True, bias=True, hash_seed=2):
+        super(HashLinear, self).__init__()
+
+        self.hash_seed = hash_seed
+        self.use_bias = bias
+        self.hash_bias = hash_bias
+        self.xi = xi
+
+        self.in_features = in_features
+        self.out_features = out_features
+
+        #  Virtual sizes
+        self.size_w = in_features * out_features
+        self.size_b = out_features
+
+        #  Compressed sizes
+        self.hsize_w = math.ceil(self.size_w * compression)
+
+        if self.hash_bias:
+            self.hsize_b = math.ceil(self.size_b * compression)
+        else:
+            self.hsize_b = self.size_b
+
+        self.h_weight = nn.Parameter(torch.Tensor(self.hsize_w))
+        if bias:
+            self.h_bias = nn.Parameter(torch.Tensor(self.hsize_b))
+
+        self.xxhash = xxhash
+
+        self.hash_config('W')
+        if bias and self.hash_bias:
+            self.hash_config('B')
+
+        self.reset_parameters()
+
+    def hash_config(self, WorB):
+        '''
+        Returns virtual matrices with indices into the compressed
+        size given by the hashing function.
+        '''
+        assert WorB == 'W' or WorB == 'B'
+
+        if WorB == 'W':
+            h_size = self.hsize_w
+            dim1 = self.out_features
+            dim2 = self.in_features
+            self.idxW = self.hash_func(h_size, dim1, dim2, 'idxW')
+        elif WorB == 'B':
+            h_size = self.hsize_b
+            dim1 = self.out_features
+            dim2 = 1
+            self.idxB = self.hash_func(h_size, dim1, dim2, 'idxB').squeeze()
+
+        if self.xi:
+            # Returns 1 and -1
+            if WorB == 'W':
+                self.xiW = nn.Parameter(self.hash_func(2, dim1, dim2,
+                                          'xiW').add(1).mul(2).add(-3).float(),
+                                     requires_grad=False)
+            elif WorB == 'B':
+                self.xiB = nn.Parameter(self.hash_func(2, dim1, dim2,
+                                          'xiB').add(1).mul(2).add(-3).float().squeeze(),
+                                     requires_grad=False)
+
+    def hash_func(self, hN, size_out, size_in, extra_str=''):
+        '''
+        Hash matrix indices to an index in the compressed vector
+        representation.
+        Returns a matrix of indices with size size_out x size_in,
+        where the indices are in the range [0,hN).
+        '''
+        idx = torch.Tensor(size_out, size_in).long()
+        for i in range(size_out):
+            for j in range(size_in):
+                key = '{}_{}{}'.format(i, j, extra_str)
+
+                # Wrap hashed values to the compressed range
+                idx[i, j] = self.xxhash.xxh32(key, self.hash_seed).intdigest() % hN
+
+        return idx
+
+    def reset_parameters(self):
+        stdv = 1. / math.sqrt(self.in_features)
+        nn.init.uniform_(self.h_weight, -stdv, stdv)
+        if self.use_bias:
+            nn.init.uniform_(self.h_bias, -stdv, stdv)
+
+    def forward(self, x):
+        # self.idxW is a matrix of the full size of type LongTensor,
+        # which contains indices that selects from the elements in h_weight
+        if self.use_bias:
+            if self.hash_bias:
+                if self.xi:
+                    return F.linear(x, self.h_weight[self.idxW] * self.xiW, self.h_bias[self.idxB] * self.xiB)
+                else:
+                    return F.linear(x, self.h_weight[self.idxW], self.h_bias[self.idxB])
+            else:
+                if self.xi:
+                    return F.linear(x, self.h_weight[self.idxW] * self.xiW, self.h_bias)
+                else:
+                    return F.linear(x, self.h_weight[self.idxW], self.h_bias)
+        else:
+            if self.xi:
+                return F.linear(x, self.h_weight[self.idxW] * self.xiW, None)
+            else:
+                return F.linear(x, self.h_weight[self.idxW], None)
+
+class EnsembleModule(nn.Module):
+    def __init__(self, in_features, out_features, hidden_features, compression_rate, n_ensemble, nl, num_hidden_layers, outermost_linear):
+        super().__init__()
+
+        self.n_ensemble = n_ensemble
+
+        subnets = []
+        for n in range(n_ensemble):
+            subnet = []
+            
+            subnet.append(HashLinear(in_features, hidden_features, compression_rate, hash_seed=2+n))
+            subnet.append(nl)
+            
+            for i in range(num_hidden_layers):
+                subnet.append(HashLinear(hidden_features, hidden_features, compression_rate, hash_seed=2+n))
+                subnet.append(nl) 
+
+            if outermost_linear:
+                subnet.append(HashLinear(hidden_features, out_features, compression_rate, hash_seed=2+n))
+            else:
+                subnet.append(HashLinear(hidden_features, out_features, compression_rate, hash_seed=2+n))
+                subnet.append(nl)
+
+            subnets.append(MetaSequential(*subnet))
+
+        self.subnets = nn.ModuleList(subnets)
+
+    def forward(self, x):       
+        return sum(map(lambda m: m(x), self.subnets)) / self.n_ensemble
+
+
+class HashLinearEnsemble(nn.Module):
+    '''
+    This layer implements a linear hashed network as in
+     - Chen, W., Wilson, J., Tyree, S., Weinberger, K. and Chen, Y., 2015,
+       Compressing neural networks with the hashing trick.
+       In International Conference on Machine Learning (pp. 2285-2294).
+    It is largely based on the above authors (Lua)Torch implementation:
+    https://www.cse.wustl.edu/~ychen/HashedNets
+    Note that some static hashing parameters are wrapped with
+    `Parameter(..., requires_grad=False)` so that they get sent
+    to device along with the layer. I.e. check for requires_grad
+    when computing total number of parameters.
+    '''
+    def __init__(self, in_features, out_features, compression, n_ensemble,
+                 xi=False, hash_bias=False, bias=True, hash_seed=2):
+        super(HashLinearEnsemble, self).__init__()
+
+        self.hash_seed = hash_seed
+        self.use_bias = bias
+        self.hash_bias = hash_bias
+        self.xi = xi
+        self.n_ensemble = n_ensemble
+
+        self.in_features = in_features
+        self.out_features = out_features
+
+        #  Virtual sizes
+        self.size_w = in_features * out_features
+        self.size_b = out_features
+
+        #  Compressed sizes
+        self.hsize_w = math.ceil(self.size_w * compression)
+
+        if self.hash_bias:
+            self.hsize_b = math.ceil(self.size_b * compression)
+        else:
+            self.hsize_b = self.size_b
+
+
+        h_weight = [nn.Parameter(torch.Tensor(self.hsize_w)) for _ in range(n_ensemble)]
+        self.h_weight = nn.ParameterList(h_weight)
+        if bias:
+            self.h_bias = nn.Parameter(torch.Tensor(self.hsize_b))
+
+        self.xxhash = xxhash
+
+        self.hash_config('W')
+        if bias and self.hash_bias:
+            self.hash_config('B')
+
+        self.reset_parameters()
+
+    def hash_config(self, WorB):
+        '''
+        Returns virtual matrices with indices into the compressed
+        size given by the hashing function.
+        '''
+        assert WorB == 'W' or WorB == 'B'
+
+        if WorB == 'W':
+            h_size = self.hsize_w
+            dim1 = self.out_features
+            dim2 = self.in_features
+            idxW = [self.hash_func(h_size, dim1, dim2, self.hash_seed+i, 'idxW') for i in range(0,self.n_ensemble)]
+            self.idxW = idxW
+        elif WorB == 'B':
+            h_size = self.hsize_b
+            dim1 = self.out_features
+            dim2 = 1
+            self.idxB = self.hash_func(h_size, dim1, dim2, self.hash_seed, 'idxB').squeeze()
+
+        if self.xi:
+            # Returns 1 and -1
+            if WorB == 'W':
+                xiW = [nn.Parameter(self.hash_func(2, dim1, dim2, self.hash_seed+i,
+                                        'xiW').add(1).mul(2).add(-3).float(),
+                                     requires_grad=False) for i in range(self.n_ensemble)]
+                self.xiW = nn.ParameterList(xiW)
+            elif WorB == 'B':
+                self.xiB = nn.Parameter(self.hash_func(2, dim1, dim2, self.hash_seed,
+                                          'xiB').add(1).mul(2).add(-3).float().squeeze(),
+                                     requires_grad=False)
+
+    def hash_func(self, hN, size_out, size_in, hash_seed, extra_str=''):
+        '''
+        Hash matrix indices to an index in the compressed vector
+        representation.
+        Returns a matrix of indices with size size_out x size_in,
+        where the indices are in the range [0,hN).
+        '''
+        idx = torch.Tensor(size_out, size_in).long()
+        for i in range(size_out):
+            for j in range(size_in):
+                key = '{}_{}{}'.format(i, j, extra_str)
+
+                # Wrap hashed values to the compressed range
+                idx[i, j] = self.xxhash.xxh32(key, hash_seed).intdigest() % hN
+
+        return idx
+
+    def reset_parameters(self):
+        stdv = 1. / math.sqrt(self.in_features)
+        # for h_weight in self.h_weight:
+        #     if self.in_features > 2 and self.out_features > 1:
+        #         nn.init.xavier_normal_(h_weight)
+        #     else:
+        #         nn.init.uniform_(h_weight, -stdv, stdv)
+        for h_weight in self.h_weight:       
+            nn.init.uniform_(h_weight, -stdv, stdv)
+        if self.use_bias:
+            nn.init.uniform_(self.h_bias, -stdv, stdv)
+
+    def forward(self, x):
+        # self.idxW is a matrix of the full size of type LongTensor,
+        # which contains indices that selects from the elements in h_weight
+
+        h_weight = []
+        for i in range(0, len(self.h_weight)):
+            if self.use_bias:
+                if self.hash_bias:
+                    if self.xi:
+                        h_weight.append(self.h_weight[i][self.idxW[i]] * self.xiW[i])
+                    else:
+                        h_weight.append(self.h_weight[i][self.idxW[i]])
+                else:
+                    if self.xi:
+                        h_weight.append(self.h_weight[i][self.idxW[i]] * self.xiW[i])
+                    else:
+                        h_weight.append(self.h_weight[i][self.idxW[i]])
+            else:
+                if self.xi:
+                    h_weight.append(self.h_weight[i][self.idxW[i]] * self.xiW[i])
+                else:
+                    h_weight.append(self.h_weight[i][self.idxW[i]])
+        
+        h_weight = sum(h_weight)
+
+        if self.use_bias:
+            if self.hash_bias:
+                if self.xi:
+                    return F.linear(x, h_weight, self.h_bias[self.idxB] * self.xiB)
+                else:
+                    return F.linear(x, h_weight, self.h_bias[self.idxB])
+            else:
+                if self.xi:
+                    return F.linear(x, h_weight, self.h_bias)
+                else:
+                    return F.linear(x, h_weight, self.h_bias)
+        else:
+            if self.xi:
+                return F.linear(x, h_weight, None)
+            else:
+                return F.linear(x, h_weight, None)
 
 class BatchLinear(nn.Linear, MetaModule):
     '''A linear meta-layer that can deal with batched weight matrices and biases, as for instance output by a
@@ -40,11 +389,11 @@ class FCBlock(MetaModule):
     '''
 
     def __init__(self, in_features, out_features, num_hidden_layers, hidden_features,
-                 outermost_linear=False, nonlinearity='relu', weight_init=None):
+                 outermost_linear=False, nonlinearity='relu', weight_init=None, sparse_matrix='none'):
         super().__init__()
 
         self.first_layer_init = None
-
+        self.sparse_type = sparse_matrix
         # Dictionary that maps nonlinearity name to the respective function, initialization, and, if applicable,
         # special first-layer initialization scheme
         nls_and_inits = {'sine':(Sine(), sine_init, first_layer_sine_init),
@@ -63,23 +412,154 @@ class FCBlock(MetaModule):
             self.weight_init = nl_weight_init
 
         self.net = []
-        self.net.append(MetaSequential(
-            BatchLinear(in_features, hidden_features), nl
-        ))
-
-        for i in range(num_hidden_layers):
+        if sparse_matrix == 'none':
             self.net.append(MetaSequential(
-                BatchLinear(hidden_features, hidden_features), nl
+                BatchLinear(in_features, hidden_features), nl
             ))
 
-        if outermost_linear:
-            self.net.append(MetaSequential(BatchLinear(hidden_features, out_features)))
+            for i in range(num_hidden_layers):
+                self.net.append(MetaSequential(
+                    BatchLinear(hidden_features, hidden_features), nl
+                ))
+
+            if outermost_linear:
+                self.net.append(MetaSequential(BatchLinear(hidden_features, out_features)))
+            else:
+                self.net.append(MetaSequential(
+                    BatchLinear(hidden_features, out_features), nl
+                ))
+
+        if sparse_matrix == 'lowrank':
+            lowrank_k=3
+            self.net.append(MetaSequential(
+                BatchLinear(in_features, hidden_features), nl
+            ))
+
+            for i in range(num_hidden_layers):
+                self.net.append(MetaSequential(
+                    LowRankLinear(hidden_features, hidden_features, k=lowrank_k), nl
+                ))
+
+            if outermost_linear:
+                self.net.append(MetaSequential(BatchLinear(hidden_features, out_features)))
+            else:
+                self.net.append(MetaSequential(
+                    BatchLinear(hidden_features, out_features), nl
+                ))
+
+        elif sparse_matrix == 'hashlinear':
+            compression_rate = 0.32 # 5 %
+            self.net.append(MetaSequential(
+                HashLinear(in_features, hidden_features, compression_rate), nl
+            ))
+
+            for i in range(num_hidden_layers):
+                self.net.append(MetaSequential(
+                    HashLinear(hidden_features, hidden_features, compression_rate), nl
+                ))
+
+            if outermost_linear:
+                self.net.append(MetaSequential(HashLinear(hidden_features, out_features, compression_rate)))
+            else:
+                self.net.append(MetaSequential(
+                    HashLinear(hidden_features, out_features, compression_rate), nl
+                ))
+
+        elif sparse_matrix == 'hashlinearensemble':
+            compression_rate = 0.02 # 5 %
+            n_ensemble = 8
+            self.net = EnsembleModule(in_features, out_features, hidden_features, compression_rate, n_ensemble, nl, num_hidden_layers, outermost_linear)
+
+            self.weight_init = None
+            first_layer_init = None
+
+
+        elif sparse_matrix == 'linear+butterfly':
+            nblocks = 3
+            butterfly_init = 'randn'
+            self.net.append(MetaSequential(
+                BatchLinear(in_features, hidden_features), nl
+            ))
+
+            for i in range(num_hidden_layers):
+                self.net.append(MetaSequential(
+                    Butterfly(hidden_features, hidden_features, init=butterfly_init, nblocks=nblocks), nl
+                ))
+
+            if outermost_linear:
+                self.net.append(MetaSequential(BatchLinear(hidden_features, out_features)))
+            else:
+                self.net.append(MetaSequential(
+                    BatchLinear(hidden_features, out_features), nl
+                ))
+                
+
+
+        elif sparse_matrix == 'butterfly':
+            nblocks = 4
+            butterfly_init = 'randn'
+            #butterfly_init = 'ortho'
+            #butterfly_init = 'identity'
+            self.net.append(MetaSequential(
+                Butterfly(in_features, hidden_features, init=butterfly_init, nblocks=nblocks), nl
+            ))
+
+            for i in range(num_hidden_layers):
+                self.net.append(MetaSequential(
+                    Butterfly(hidden_features, hidden_features, init=butterfly_init, nblocks=nblocks), nl
+                ))
+
+            if outermost_linear:
+                self.net.append(MetaSequential(Butterfly(hidden_features, out_features, init=butterfly_init, nblocks=nblocks)))
+            else:
+                self.net.append(MetaSequential(
+                    Butterfly(hidden_features, out_features, init=butterfly_init, nblocks=nblocks), nl
+                ))
+                
+            self.weight_init = None
+            first_layer_init = None
+
+        elif sparse_matrix == 'BP':
+            complex = False
+            nblocks=4
+            butterfly_init = 'randn'
+            self.net.append(MetaSequential(
+                BatchLinear(in_features, hidden_features), nl
+            ))
+
+            for i in range(num_hidden_layers):
+                self.net.append(MetaSequential(
+                    FixedPermutation(bitreversal_permutation(hidden_features, pytorch_format=True)),
+                    Butterfly(hidden_features, hidden_features, init=butterfly_init, nblocks=nblocks), nl
+                ))
+            # for i in range(num_hidden_layers):
+            #     self.net.append(MetaSequential(
+            #     PermutationOld(size=hidden_features, share_logit=False, increasing_stride=True),
+            #     ButterflyOld(in_size=hidden_features,
+            #                  out_size=hidden_features,
+            #                  bias=False,
+            #                  complex=complex,
+            #                  ortho_init=False,
+            #                  tied_weight=False,
+            #                  nblocks=nblocks,
+            #                  fast=False), nl
+            #     ))
+
+            if outermost_linear:
+                self.net.append(MetaSequential(BatchLinear(hidden_features, out_features)))
+            else:
+                self.net.append(MetaSequential(
+                    BatchLinear(hidden_features, out_features), nl
+                ))                
+
+            self.weight_init = None
+            first_layer_init = first_layer_sine_init
+
+        if 'ensemble' not in sparse_matrix:
+            self.net = MetaSequential(*self.net)
         else:
-            self.net.append(MetaSequential(
-                BatchLinear(hidden_features, out_features), nl
-            ))
-
-        self.net = MetaSequential(*self.net)
+            self.net = MetaSequential(*[self.net])
+        
         if self.weight_init is not None:
             self.net.apply(self.weight_init)
 
@@ -90,7 +570,17 @@ class FCBlock(MetaModule):
         if params is None:
             params = OrderedDict(self.named_parameters())
 
+        # if self.sparse_type == 'BP':
+        #     coords_size = coords.size()
+        #     coords = coords.view(-1, coords.size(2))
+        #     coords = coords.contiguous()
+
         output = self.net(coords, params=get_subdict(params, 'net'))
+
+        # if self.sparse_type == 'BP':
+        #     coords = coords.view(coords_size)
+        #     coords = coords.contiguous()
+
         return output
 
     def forward_with_activations(self, coords, params=None, retain_grad=False):
@@ -120,7 +610,7 @@ class SingleBVPNet(MetaModule):
     '''A canonical representation network for a BVP.'''
 
     def __init__(self, out_features=1, type='sine', in_features=2,
-                 mode='mlp', hidden_features=256, num_hidden_layers=3, **kwargs):
+                 mode='mlp', sparse_matrix='none', hidden_features=256, num_hidden_layers=3, **kwargs):
         super().__init__()
         self.mode = mode
 
@@ -136,8 +626,175 @@ class SingleBVPNet(MetaModule):
 
         self.image_downsampling = ImageDownsampling(sidelength=kwargs.get('sidelength', None),
                                                     downsample=kwargs.get('downsample', False))
+
         self.net = FCBlock(in_features=in_features, out_features=out_features, num_hidden_layers=num_hidden_layers,
-                           hidden_features=hidden_features, outermost_linear=True, nonlinearity=type)
+                        hidden_features=hidden_features, outermost_linear=True, nonlinearity=type, sparse_matrix=sparse_matrix)
+        print(self)
+
+    def forward(self, model_input, params=None):
+        if params is None:
+            params = OrderedDict(self.named_parameters())
+
+        # Enables us to compute gradients w.r.t. coordinates
+        coords_org = model_input['coords'].clone().detach().requires_grad_(True)
+        coords = coords_org
+
+        # various input processing methods for different applications
+        if self.image_downsampling.downsample:
+            coords = self.image_downsampling(coords)
+        if self.mode == 'rbf':
+            coords = self.rbf_layer(coords)
+        elif self.mode == 'nerf':
+            coords = self.positional_encoding(coords)
+
+        output = self.net(coords, get_subdict(params, 'net'))
+        return {'model_in': coords_org, 'model_out': output}
+
+    def forward_with_activations(self, model_input):
+        '''Returns not only model output, but also intermediate activations.'''
+        coords = model_input['coords'].clone().detach().requires_grad_(True)
+        activations = self.net.forward_with_activations(coords)
+        return {'model_in': coords, 'model_out': activations.popitem(), 'activations': activations}
+
+
+class ModulatedFCBlock(MetaModule):
+    '''A fully connected neural network that also allows swapping out the weights when used with a hypernetwork.
+    Can be used just as a normal neural network though, as well.
+    '''
+
+    def __init__(self, in_features, out_features, num_hidden_layers, hidden_features,
+                 outermost_linear=False, nonlinearity='relu', weight_init=None, modulation_type='functa'):
+        super().__init__()
+
+        self.first_layer_init = None
+        self.modulation_type = modulation_type
+        # Dictionary that maps nonlinearity name to the respective function, initialization, and, if applicable,
+        # special first-layer initialization scheme
+        nls_and_inits = {'sine':(Sine(), sine_init, first_layer_sine_init),
+                         'relu':(nn.ReLU(inplace=True), init_weights_normal, None),
+                         'sigmoid':(nn.Sigmoid(), init_weights_xavier, None),
+                         'tanh':(nn.Tanh(), init_weights_xavier, None),
+                         'selu':(nn.SELU(inplace=True), init_weights_selu, None),
+                         'softplus':(nn.Softplus(), init_weights_normal, None),
+                         'elu':(nn.ELU(inplace=True), init_weights_elu, None)}
+
+        nl, nl_weight_init, first_layer_init = nls_and_inits[nonlinearity]
+
+        if weight_init is not None:  # Overwrite weight init if passed
+            self.weight_init = weight_init
+        else:
+            self.weight_init = nl_weight_init
+
+        self.net = []
+        if modulation_type == 'functa':
+            self.context_params = nn.Parameters()
+
+            self.net.append(MetaSequential(
+                BatchLinear(in_features, hidden_features), nl
+            ))
+
+            for i in range(num_hidden_layers):
+                self.net.append(MetaSequential(
+                    BatchLinear(hidden_features, hidden_features), nl
+                ))
+
+            if outermost_linear:
+                self.net.append(MetaSequential(BatchLinear(hidden_features, out_features)))
+            else:
+                self.net.append(MetaSequential(
+                    BatchLinear(hidden_features, out_features), nl
+                ))
+
+        elif modulation_type == 'hashlinear':
+            compression_rate = 0.04
+            self.net.append(MetaSequential(
+                HashLinear(in_features, hidden_features, compression_rate), nl
+            ))
+
+            for i in range(num_hidden_layers):
+                self.net.append(MetaSequential(
+                    HashLinear(hidden_features, hidden_features, compression_rate), nl
+                ))
+
+            if outermost_linear:
+                self.net.append(MetaSequential(HashLinear(hidden_features, out_features, compression_rate)))
+            else:
+                self.net.append(MetaSequential(
+                    HashLinear(hidden_features, out_features, compression_rate), nl
+                ))
+
+
+        self.net = MetaSequential(*self.net)
+        if self.weight_init is not None:
+            self.net.apply(self.weight_init)
+
+        if first_layer_init is not None: # Apply special initialization to first layer, if applicable.
+            self.net[0].apply(first_layer_init)
+
+    def forward(self, coords, params=None, **kwargs):
+        if params is None:
+            params = OrderedDict(self.named_parameters())
+
+        if self.sparse_type == 'BP':
+            coords_size = coords.size()
+            coords = coords.view(-1, coords.size(2))
+            coords = coords.contiguous()
+
+        output = self.net(coords, params=get_subdict(params, 'net'))
+
+        if self.sparse_type == 'BP':
+            coords = coords.view(coords_size)
+            coords = coords.contiguous()
+
+        return output
+
+    def forward_with_activations(self, coords, params=None, retain_grad=False):
+        '''Returns not only model output, but also intermediate activations.'''
+        if params is None:
+            params = OrderedDict(self.named_parameters())
+
+        activations = OrderedDict()
+
+        x = coords.clone().detach().requires_grad_(True)
+        activations['input'] = x
+        for i, layer in enumerate(self.net):
+            subdict = get_subdict(params, 'net.%d' % i)
+            for j, sublayer in enumerate(layer):
+                if isinstance(sublayer, BatchLinear):
+                    x = sublayer(x, params=get_subdict(subdict, '%d' % j))
+                else:
+                    x = sublayer(x)
+
+                if retain_grad:
+                    x.retain_grad()
+                activations['_'.join((str(sublayer.__class__), "%d" % i))] = x
+        return activations
+
+
+
+class MetaBVPNet(MetaModule):
+    '''A canonical representation network for a BVP.'''
+
+    def __init__(self, out_features=1, type='sine', in_features=2,
+                 mode='mlp', sparse_matrix='none', hidden_features=256, num_hidden_layers=3, **kwargs):
+        super().__init__()
+        self.mode = mode
+
+        if self.mode == 'rbf':
+            self.rbf_layer = RBFLayer(in_features=in_features, out_features=kwargs.get('rbf_centers', 1024))
+            in_features = kwargs.get('rbf_centers', 1024)
+        elif self.mode == 'nerf':
+            self.positional_encoding = PosEncodingNeRF(in_features=in_features,
+                                                       sidelength=kwargs.get('sidelength', None),
+                                                       fn_samples=kwargs.get('fn_samples', None),
+                                                       use_nyquist=kwargs.get('use_nyquist', True))
+            in_features = self.positional_encoding.out_dim
+
+        self.image_downsampling = ImageDownsampling(sidelength=kwargs.get('sidelength', None),
+                                                    downsample=kwargs.get('downsample', False))
+
+        self.net = FCBlock(in_features=in_features, out_features=out_features, num_hidden_layers=num_hidden_layers,
+                        hidden_features=hidden_features, outermost_linear=True, nonlinearity=type, sparse_matrix=sparse_matrix)
         print(self)
 
     def forward(self, model_input, params=None):
@@ -634,6 +1291,29 @@ def first_layer_sine_init(m):
             # See paper sec. 3.2, final paragraph, and supplement Sec. 1.5 for discussion of factor 30
             m.weight.uniform_(-1 / num_input, 1 / num_input)
 
+def sine_init_ensemble(m, n_ensemble=1):
+    with torch.no_grad():
+        if hasattr(m, 'weight'):
+            num_input = m.weight.size(-1)
+            # See supplement Sec. 1.5 for discussion of factor 30
+            m.weight.uniform_(-np.sqrt(6 / num_input) / 30 / n_ensemble, np.sqrt(6 / num_input) / 30 / n_ensemble)
+
+
+def first_layer_sine_init_ensemble(m, n_ensemble=1):
+    with torch.no_grad():
+        if hasattr(m, 'weight'):
+            num_input = m.weight.size(-1)
+            # See paper sec. 3.2, final paragraph, and supplement Sec. 1.5 for discussion of factor 30
+            m.weight.uniform_(-1 / num_input / n_ensemble, 1 / num_input / n_ensemble)
+
+
+
+def butterfly_sine_init(m, scale=6):
+    with torch.no_grad():
+        if hasattr(m, 'weight'):
+            num_input = m.weight.size(-1)
+            # See supplement Sec. 1.5 for discussion of factor 30
+            m.weight.uniform_(-np.sqrt(scale / num_input) / 30, np.sqrt(scale / num_input) / 30)
 
 ###################
 # Complex operators
