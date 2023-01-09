@@ -3,6 +3,8 @@ import glob
 import math
 import os
 
+from PIL import Image
+from pathlib import Path
 import matplotlib.colors as colors
 import numpy as np
 import scipy.io.wavfile as wavfile
@@ -12,11 +14,11 @@ import skimage
 import skimage.filters
 import skvideo.io
 import torch
-from PIL import Image
 from torch.utils.data import Dataset
 from torchvision.transforms import Resize, Compose, ToTensor, Normalize
 import torchvision
 from torchvision.datasets import VisionDataset
+
 
 import pdb
 
@@ -1018,8 +1020,8 @@ ROOT_DIR_FFHQ = '/data/nvme2/ffhq-dataset/images256x256'
 ROOT_DATA_LIST = '/data/nvme3/inr-diff/asym-diff/src/datasets'
 
 class FFHQ(ImageFolder):
-    train_list_file = os.path.join(ROOT_DATA_LIST, 'assets/ffhqtrain.txt')
-    val_list_file = os.path.join(ROOT_DATA_LIST, 'assets/ffhqvalidation.txt')
+    train_list_file = Path(__file__).parent.joinpath('assets/ffhqtrain.txt')
+    val_list_file = Path(__file__).parent.joinpath('assets/ffhqvalidation.txt')
 
     def __init__(self, root=ROOT_DIR_FFHQ, split='train', **kwargs):
         super().__init__(root, FFHQ.train_list_file, FFHQ.val_list_file, split, **kwargs)
