@@ -10,13 +10,19 @@ from tqdm.autonotebook import tqdm
 import time
 import numpy as np
 import os
+import math
 import shutil
-import pdb
+import torchvision
+
+import meta_modules, modules, utils, loss_functions
+
 
 def train(model, train_dataloader, epochs, lr, steps_til_summary, epochs_til_checkpoint, model_dir, loss_fn,
           summary_fn, val_dataloader=None, double_precision=False, clip_grad=False, use_lbfgs=False, loss_schedules=None):
 
     optim = torch.optim.Adam(lr=lr, params=model.parameters())
+    #optim = torch.optim.Adam(lr=lr, betas=(0.9, 0.99), params=model.net.parameters())
+    #optim = torch.optim.Adam(lr=lr, betas=(0.9, 0.99), params=model.positional_encoding.parameters())
 
     # copy settings from Raissi et al. (2019) and here 
     # https://github.com/maziarraissi/PINNs
@@ -43,11 +49,11 @@ def train(model, train_dataloader, epochs, lr, steps_til_summary, epochs_til_che
     with tqdm(total=len(train_dataloader) * epochs) as pbar:
         train_losses = []
         for epoch in range(epochs):
-            if not epoch % epochs_til_checkpoint and epoch:
-                torch.save(model.state_dict(),
-                           os.path.join(checkpoints_dir, 'model_epoch_%04d.pth' % epoch))
-                np.savetxt(os.path.join(checkpoints_dir, 'train_losses_epoch_%04d.txt' % epoch),
-                           np.array(train_losses))
+            # if not epoch % epochs_til_checkpoint and epoch:
+            #     torch.save(model.state_dict(),
+            #                os.path.join(checkpoints_dir, 'model_epoch_%04d.pth' % epoch))
+            #     np.savetxt(os.path.join(checkpoints_dir, 'train_losses_epoch_%04d.txt' % epoch),
+            #                np.array(train_losses))
 
             for step, (model_input, gt) in enumerate(train_dataloader):
                 start_time = time.time()
@@ -88,10 +94,10 @@ def train(model, train_dataloader, epochs, lr, steps_til_summary, epochs_til_che
                 train_losses.append(train_loss.item())
                 writer.add_scalar("total_train_loss", train_loss, total_steps)
 
-                if not total_steps % steps_til_summary:
-                    torch.save(model.state_dict(),
-                               os.path.join(checkpoints_dir, 'model_current.pth'))
-                    summary_fn(model, model_input, gt, model_output, writer, total_steps)
+                # if not total_steps % steps_til_summary:
+                #     torch.save(model.state_dict(),
+                #                os.path.join(checkpoints_dir, 'model_current.pth'))
+                #     summary_fn(model, model_input, gt, model_output, writer, total_steps)
 
                 if not use_lbfgs:
                     optim.zero_grad()
@@ -168,11 +174,11 @@ def meta_train(model, train_dataloader, epochs, lr, num_iters_inner, lr_inner,
 
         train_losses = []
         for epoch in range(epochs):
-            if not epoch % epochs_til_checkpoint and epoch:
-                torch.save(model.state_dict(),
-                           os.path.join(checkpoints_dir, 'model_epoch_%04d.pth' % epoch))
-                np.savetxt(os.path.join(checkpoints_dir, 'train_losses_epoch_%04d.txt' % epoch),
-                           np.array(train_losses))
+            # if not epoch % epochs_til_checkpoint and epoch:
+            #     torch.save(model.state_dict(),
+            #                os.path.join(checkpoints_dir, 'model_epoch_%04d.pth' % epoch))
+            #     np.savetxt(os.path.join(checkpoints_dir, 'train_losses_epoch_%04d.txt' % epoch),
+            #                np.array(train_losses))
 
             for step, (model_input, gt) in enumerate(train_dataloader):
                 start_time = time.time()
@@ -222,10 +228,10 @@ def meta_train(model, train_dataloader, epochs, lr, num_iters_inner, lr_inner,
                 train_losses.append(train_loss.item())
                 writer.add_scalar("total_train_loss", train_loss, total_steps)
 
-                if not total_steps % steps_til_summary:
-                    torch.save(model.state_dict(),
-                               os.path.join(checkpoints_dir, 'model_current.pth'))
-                    #summary_fn(model, model_input, gt, model_output, writer, total_steps)
+                # if not total_steps % steps_til_summary:
+                #     torch.save(model.state_dict(),
+                #                os.path.join(checkpoints_dir, 'model_current.pth'))
+                #     summary_fn(model, model_input, gt, model_output, writer, total_steps)
 
                 optim.zero_grad()
 
@@ -263,8 +269,8 @@ def meta_train(model, train_dataloader, epochs, lr, num_iters_inner, lr_inner,
 
         torch.save(model.state_dict(),
                    os.path.join(checkpoints_dir, 'model_final.pth'))
-        np.savetxt(os.path.join(checkpoints_dir, 'train_losses_final.txt'),
-                   np.array(train_losses))
+        # np.savetxt(os.path.join(checkpoints_dir, 'train_losses_final.txt'),
+        #            np.array(train_losses))
 
 
 def multidomain_train(model, train_dataloader, epochs, lr,
@@ -390,6 +396,9 @@ def autoencoder_train(model, train_dataloader, epochs, lr,
     checkpoints_dir = os.path.join(model_dir, 'checkpoints')
     utils.cond_mkdir(checkpoints_dir)
 
+    sample_dir = os.path.join(model_dir, 'samples')
+    utils.cond_mkdir(sample_dir)
+
     writer = SummaryWriter(summaries_dir)
     
     total_steps = 0
@@ -466,7 +475,13 @@ def autoencoder_train(model, train_dataloader, epochs, lr,
 
                 if not total_steps % steps_til_summary:
                     tqdm.write("Epoch %d, Total loss %0.6f, Total PSNR %2.2f, iteration time %0.6f" % (epoch, train_loss, train_psnr, time.time() - start_time))
-                    #tqdm.write("Epoch %d, Total loss %0.6f, iteration time %0.6f" % (epoch, train_loss, time.time() - start_time))
+                    
+                    H = int(math.sqrt(gt['img'].size(1)))
+                    gt_grid = torchvision.utils.make_grid(gt['img'].detach().cpu().view(-1, H, H, 3).permute(0, 3, 1, 2))
+                    pred_grid = torchvision.utils.make_grid(model_output['model_out'].detach().cpu().view(-1, H, H, 3).permute(0, 3, 1, 2))
+
+                    torchvision.utils.save_image(gt_grid, os.path.join(sample_dir, f'gt_grid_iter{total_steps}.png'))
+                    torchvision.utils.save_image(pred_grid, os.path.join(sample_dir, f'pred_grid_iter{total_steps}.png'))
 
                     if val_dataloader is not None:
                         print("Running validation set...")
@@ -490,6 +505,45 @@ def autoencoder_train(model, train_dataloader, epochs, lr,
                    np.array(train_losses))
         np.savetxt(os.path.join(checkpoints_dir, 'train_psnrs_final.txt'),
                    np.array(train_psnrs))
+
+
+def memorize(model, batch_data, epochs, lr, loss_fn, clip_grad=False):
+
+    PSNR = PeakSignalNoiseRatio()
+    optim = torch.optim.Adam(lr=lr, params=model.parameters())
+
+    total_steps = 0
+    
+
+    for epoch in range(epochs):
+        model_input, gt = batch_data
+        
+        model_input = {key: value.cuda() for key, value in model_input.items()}
+        gt = {key: value.cuda() for key, value in gt.items()}
+
+        model_output = model(model_input)
+        losses = loss_fn(model_output, gt)
+
+        train_loss = 0.
+        for loss_name, loss in losses.items():
+            single_loss = loss.mean()
+            train_loss += single_loss      
+
+        optim.zero_grad()
+        train_loss.backward()
+
+        if clip_grad:
+            if isinstance(clip_grad, bool):
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.)
+            else:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=clip_grad)
+
+        optim.step()
+
+    psnr = PSNR(model_output['model_out'][0].cpu() * 0.5 + 0.5, gt['img'][0].cpu() * 0.5 + 0.5)
+    
+    return [float(train_loss), float(psnr)], model_output
+
 
 class LinearDecaySchedule():
     def __init__(self, start_val, final_val, num_steps):

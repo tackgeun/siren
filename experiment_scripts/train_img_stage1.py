@@ -41,34 +41,33 @@ p.add_argument('--steps_til_summary', type=int, default=1000,
 
 p.add_argument('--dataset', type=str, default='celeba_64x64',
                help='Time interval in seconds until tensorboard summary is saved.')
-# p.add_argument('--dataset', type=str, default='celeba_32x32',
-#                help='Time interval in seconds until tensorboard summary is saved.')
 p.add_argument('--model_type', type=str, default='sine',
                help='Nonlinearity for the hypo-network module')
 
 p.add_argument('--checkpoint_path', default=None, help='Checkpoint to trained model.')
 
-p.add_argument('--conv_encoder', action='store_true', default=False, help='Use convolutional encoder process')
+p.add_argument('--arch_type', type=str, default='auto-encoder')
+p.add_argument('--trainer_type', type=str, default='auto-encoder')
 
-p.add_argument('--arch_type', type=str, default='latentmodulatedsiren')
-p.add_argument('--trainer_type', type=str, default='meta-train')
+p.add_argument('--width', type=int, default=256)
+p.add_argument('--depth', type=int, default=20)
+p.add_argument('--w0', type=int, default=30)
+p.add_argument('--spatial_resize', type=int, default=0)
+p.add_argument('--latent_dim', type=int, default=256)
+p.add_argument('--encoder_feature', type=str, default='last-conv')
+p.add_argument('--zero_init_last', type=bool, default=False)
+p.add_argument('--batch_norm_init', type=bool, default=False)
 
 opt = p.parse_args()
 
 
-#assert opt.dataset == 'celeba_32x32'
-if opt.conv_encoder:
-    gmode = 'conv_cnp'
+if 'auto-encoder' in opt.arch_type:
+    gmode = 'auto-encoder'
 else:
     gmode = 'cnp'
 
-if 'auto-encoder' in opt.arch_type:
-    gmode = 'auto-encoder'
-
-#image_resolution = (32, 32)
 image_resolution = (opt.resolution, opt.resolution)
 
-#img_dataset = dataio.CelebA(split='train', downsampled=True, resolution=opt.resolution)
 img_dataset = dataio.CelebAHQ(split='train', downsampled=True, resolution=opt.resolution)
 coord_dataset = dataio.Implicit2DWrapper(img_dataset, sidelength=image_resolution)
 generalization_dataset = dataio.ImageGeneralizationWrapper(coord_dataset,
@@ -84,7 +83,17 @@ if 'latentmodulatedsiren' in opt.arch_type:
     else:
         model = meta_modules.LatentModulatedSiren(out_channels=img_dataset.img_channels)
 if 'auto-encoder' in opt.arch_type:
-    model = meta_modules.AsymmetricAutoEncoder(out_channels=img_dataset.img_channels)
+    model = meta_modules.AsymmetricAutoEncoder(
+                                                out_channels=img_dataset.img_channels,
+                                                w0=opt.w0,
+                                                spatial_resize=opt.spatial_resize,
+                                                latent_dim=opt.latent_dim,
+                                                encoder_feature=opt.encoder_feature,
+                                                width=opt.width,
+                                                depth=opt.depth,
+                                                zero_init_last=opt.zero_init_last,
+                                                batch_norm_init=opt.batch_norm_init,
+                                              )
 else:
     assert False
 

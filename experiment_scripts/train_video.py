@@ -39,6 +39,9 @@ p.add_argument('--sample_frac', type=float, default=38e-4,
                help='What fraction of video pixels to sample in each batch (default is all)')
 
 p.add_argument('--checkpoint_path', default=None, help='Checkpoint to trained model.')
+
+p.add_argument('--use_flow', default=False, action='store_true')
+
 opt = p.parse_args()
 
 if opt.dataset == 'cat':
@@ -51,11 +54,15 @@ coord_dataset = dataio.Implicit3DWrapper(vid_dataset, sidelength=vid_dataset.sha
 dataloader = DataLoader(coord_dataset, shuffle=True, batch_size=opt.batch_size, pin_memory=True, num_workers=0)
 
 # Define the model.
+out_channel = vid_dataset.channels
+if opt.use_flow:
+    out_channel += 2
+
 if opt.model_type == 'sine' or opt.model_type == 'relu' or opt.model_type == 'tanh':
-    model = modules.SingleBVPNet(type=opt.model_type, in_features=3, out_features=vid_dataset.channels,
+    model = modules.SingleBVPNet(type=opt.model_type, in_features=3, out_features=out_channel,
                                  mode='mlp', hidden_features=1024, num_hidden_layers=3, sparse_matrix=opt.sparse_type)
 elif opt.model_type == 'rbf' or opt.model_type == 'nerf':
-    model = modules.SingleBVPNet(type='relu', in_features=3, out_features=vid_dataset.channels, mode=opt.model_type)
+    model = modules.SingleBVPNet(type='relu', in_features=3, out_features=out_channel, mode=opt.model_type)
 else:
     raise NotImplementedError
 model.cuda()
@@ -63,7 +70,10 @@ model.cuda()
 root_path = os.path.join(opt.logging_root, opt.experiment_name)
 
 # Define the loss
-loss_fn = partial(loss_functions.image_mse, None)
+if opt.use_flow:
+    loss_fn = partial(loss_functions.image_mse_with_flow, None)
+else:
+    loss_fn = partial(loss_functions.image_mse, None)
 summary_fn = partial(utils.write_video_summary, vid_dataset)
 
 training.train(model=model, train_dataloader=dataloader, epochs=opt.num_epochs, lr=opt.lr,

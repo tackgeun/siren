@@ -5,6 +5,7 @@ import math
 import torch
 import torchvision
 from torch import nn
+import torch.nn.functional as F
 import numpy as np
 from collections import OrderedDict
 from typing import Any, Callable, Dict, Mapping, Optional, Tuple
@@ -278,6 +279,8 @@ class LatentToModulation(nn.Module):
                num_modulation_layers: int,
                modulate_scale: bool = True,
                modulate_shift: bool = True,
+               zero_init_last: bool = False,
+               batch_norm_init: bool = False,
                activation: str = 'relu'):
     """Constructor.
 
@@ -313,12 +316,27 @@ class LatentToModulation(nn.Module):
     self.modulations_per_layer = width * self.modulations_per_unit
     self.output_size = num_modulation_layers * self.modulations_per_layer
 
+    # added configurations
+    self.zero_init_last = zero_init_last
+    self.batch_norm_init = batch_norm_init
+
     #self.mlp = torchvision.ops.MLP(hidden_channels=self.layer_sizes + (self.output_size,))
     layer_sizes = (self.latent_dim,) + self.layer_sizes + (self.output_size,)
     mlp = []
+
+    if self.batch_norm_init:
+      mlp.append(nn.BatchNorm1d(self.latent_dim, affine=False))
+
     for i in range(0, len(layer_sizes)-1):
       mlp.append(nn.Linear(layer_sizes[i], layer_sizes[i+1]))
     self.mlp = nn.Sequential(*mlp)
+
+    # TODO: support modulate_scale
+    # only work for modulate_shift currently
+    if self.zero_init_last:
+      assert(not modulate_scale and modulate_shift)
+      nn.init.zeros_(self.mlp[-1].weight)
+      nn.init.zeros_(self.mlp[-1].bias)
 
   def forward(self, latent_vector: torch.Tensor) -> Dict[int, Dict[str, torch.Tensor]]:
     modulations = self.mlp(latent_vector)
@@ -366,8 +384,8 @@ class LatentToModulation(nn.Module):
         elif self.modulate_shift:
           start = self.width * i
           single_layer_modulations['shift'] = modulations[:, start:start +
-                                                          self.width].unsqueeze(1)
-        outputs[i] = single_layer_modulations        
+                                                          self.width].unsqueeze(1) # (batch, 1, width)
+        outputs[i] = single_layer_modulations
     return outputs
 
 class MetaSGDLrs(nn.Module):
@@ -577,12 +595,17 @@ class AsymmetricAutoEncoder(nn.Module):
                depth: int = 20,
                out_channels: int = 3,
                pretrained_encoder: str = 'resnet18',
-               latent_dim: int = 512*2*2,
+               encoder_feature: str = 'last-conv',
+               spatial_resize: int = 128,
+               latent_dim: int = 512*4*4,
                latent_vector_type: str = 'instance',
-               layer_sizes: Tuple[int, ...] = (512, 512),
+               #layer_sizes: Tuple[int, ...] = (512, 512),
+               layer_sizes: Tuple[int, ...] = (),
                w0: float = 30.,
                modulate_scale: bool = False,
-               modulate_shift: bool = True):
+               modulate_shift: bool = True,
+               zero_init_last: bool = False,
+               batch_norm_init: bool = False):
     """Constructor.
 
     Args:
@@ -610,10 +633,27 @@ class AsymmetricAutoEncoder(nn.Module):
     self.modulate_shift = modulate_shift
     self.latent_vector_type = latent_vector_type
 
+    self.spatial_resize = spatial_resize
+    self.pretrained_encoder = pretrained_encoder
+    self.encoder_feature = encoder_feature
+
+
     # Initialize pre-trained model and map from latents to modulations
-    #resnet = torchvision.models.resnet50(pretrained=True)
-    resnet = torchvision.models.resnet18(pretrained=True)
-    modules=list(resnet.children())[:-2]
+
+    if self.pretrained_encoder == 'resnet50':
+      resnet = torchvision.models.resnet50(pretrained=True)
+    elif self.pretrained_encoder == 'resnet18':
+      resnet = torchvision.models.resnet18(pretrained=True)
+    else:
+      assert(False)
+    
+    if self.encoder_feature == 'avgpool':
+      modules=list(resnet.children())[:-1]  
+    elif self.encoder_feature == 'last-conv':
+      modules=list(resnet.children())[:-2]
+    else:
+      assert(False)
+
     self.conv_encoder = nn.Sequential(*modules)  
 
     self.latent_to_modulation = LatentToModulation(
@@ -623,7 +663,9 @@ class AsymmetricAutoEncoder(nn.Module):
         width=width,
         num_modulation_layers=depth-1,
         modulate_scale=modulate_scale,
-        modulate_shift=modulate_shift)
+        modulate_shift=modulate_shift,
+        zero_init_last=zero_init_last,
+        batch_norm_init=batch_norm_init)
 
     modsiren = [ModulatedSirenLayer(f_in=self.in_channels,
                                     f_out=self.width,
@@ -649,10 +691,6 @@ class AsymmetricAutoEncoder(nn.Module):
     
     self.modsiren = nn.ModuleList(modsiren)
 
-  def reset_context_params(self, batch_size):
-    # do nothing
-    a = 1
-
   def modulate(self, x: torch.Tensor, modulations: Dict[str,torch.Tensor]) -> torch.Tensor:
     """Modulates input according to modulations.
 
@@ -668,6 +706,8 @@ class AsymmetricAutoEncoder(nn.Module):
       x = modulations['scale'] * x
     if 'shift' in modulations:
       x = x + modulations['shift']
+      #print(modulations['shift'].detach().sum(dim=2).cpu())
+      #pdb.set_trace()
     return x
 
   def forward(self, inputs: torch.Tensor) -> torch.Tensor:
@@ -681,9 +721,13 @@ class AsymmetricAutoEncoder(nn.Module):
       Output features at coords.
     """
 
-    encoded_feat = self.conv_encoder(inputs['spatial_img'])
+    spatial_img = inputs['spatial_img']
+    if self.spatial_resize > 0:
+      spatial_img = F.interpolate(spatial_img, self.spatial_resize)
+
+    encoded_feat = self.conv_encoder(spatial_img)
     encoded_feat = encoded_feat.view(encoded_feat.size(0), -1)
-  
+    
     # Compute modulations based on latent vector
     modulations = self.latent_to_modulation(encoded_feat)
 

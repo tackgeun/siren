@@ -328,7 +328,7 @@ def write_video_summary(vid_dataset, model, model_input, gt, model_output, write
 
 
 def write_image_summary(image_resolution, model, model_input, gt,
-                        model_output, writer, total_steps, prefix='train_', compute_diff='all'):
+                        model_output, writer, total_steps, prefix='train_', compute_diff='none'):
 
     gt_img = dataio.lin2img(gt['img'], image_resolution)
     pred_img = dataio.lin2img(model_output['model_out'], image_resolution)
@@ -338,6 +338,7 @@ def write_image_summary(image_resolution, model, model_input, gt,
         gt_img = gt_img[0:1, :, :, :]
         pred_img = pred_img[0:1, :, :, :]
 
+    print(gt_img.size(), pred_img.size())
     output_vs_gt = torch.cat((gt_img, pred_img), dim=-1)
     writer.add_image(prefix + 'gt_vs_pred', make_grid(output_vs_gt, scale_each=False, normalize=True),
                      global_step=total_steps)

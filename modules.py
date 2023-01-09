@@ -1,6 +1,7 @@
 import math
 import sys
 from collections import OrderedDict
+import json
 
 import numpy as np
 import xxhash
@@ -9,6 +10,7 @@ from torch import nn
 from torchmeta.modules import (MetaModule, MetaSequential)
 from torchmeta.modules.utils import get_subdict
 import torch.nn.functional as F
+import tinycudann as tcnn
 
 #from torch_butterfly import Butterfly
 #from torch_butterfly.permutation import FixedPermutation, bitreversal_permutation
@@ -33,8 +35,10 @@ class LowRankLinear(nn.Module):
         self.size_b = out_features
 
 
-        self.A = nn.Parameter(torch.Tensor(in_features, k))
-        self.B = nn.Parameter(torch.Tensor(k, out_features))
+        # self.A = nn.Parameter(torch.Tensor(in_features, k))
+        # self.B = nn.Parameter(torch.Tensor(k, out_features))
+        self.A = nn.Parameter(torch.Tensor(k, in_features))
+        self.B = nn.Parameter(torch.Tensor(out_features, k))
 
         self.h_bias = nn.Parameter(torch.Tensor(self.size_b))
 
@@ -48,7 +52,8 @@ class LowRankLinear(nn.Module):
             nn.init.uniform_(self.h_bias, -stdv, stdv)
 
     def forward(self, x):
-        return F.linear(x, torch.mm(self.A, self.B), self.h_bias)
+        #return F.linear(x, torch.mm(self.A, self.B), self.h_bias)
+        return F.linear(F.linear(x, self.A, None), self.B, self.h_bias)
 
 
 class HashLinear(nn.Module):
@@ -429,11 +434,19 @@ class FCBlock(MetaModule):
                     BatchLinear(hidden_features, out_features), nl
                 ))
 
-        if sparse_matrix == 'lowrank':
-            lowrank_k=3
-            self.net.append(MetaSequential(
-                BatchLinear(in_features, hidden_features), nl
-            ))
+        if 'lowrank' in sparse_matrix:
+            lowrank_k=int(sparse_matrix.split('lowrank')[-1])
+            if in_features <= lowrank_k:
+                self.net.append(MetaSequential(
+                    BatchLinear(in_features, hidden_features), nl
+                ))
+            else:
+                self.net.append(MetaSequential(
+                    LowRankLinear(in_features, hidden_features, k=lowrank_k), nl
+                ))
+            # self.net.append(MetaSequential(
+            #     BatchLinear(in_features, hidden_features), nl
+            # ))
 
             for i in range(num_hidden_layers):
                 self.net.append(MetaSequential(
@@ -623,13 +636,23 @@ class SingleBVPNet(MetaModule):
                                                        fn_samples=kwargs.get('fn_samples', None),
                                                        use_nyquist=kwargs.get('use_nyquist', True))
             in_features = self.positional_encoding.out_dim
-
+        elif self.mode == 'instant-ngp':
+            config = {
+                "otype": "HashGrid",
+                "n_levels": 16,
+                "n_features_per_level": 2,
+                "log2_hashmap_size": 15,
+                "base_resolution": 16,
+                "per_level_scale": 1.5
+            }            
+            self.positional_encoding = tcnn.Encoding(in_features, config)
+            in_features = 32
         self.image_downsampling = ImageDownsampling(sidelength=kwargs.get('sidelength', None),
                                                     downsample=kwargs.get('downsample', False))
 
         self.net = FCBlock(in_features=in_features, out_features=out_features, num_hidden_layers=num_hidden_layers,
                         hidden_features=hidden_features, outermost_linear=True, nonlinearity=type, sparse_matrix=sparse_matrix)
-        print(self)
+        #print(self)
 
     def forward(self, model_input, params=None):
         if params is None:
@@ -646,6 +669,12 @@ class SingleBVPNet(MetaModule):
             coords = self.rbf_layer(coords)
         elif self.mode == 'nerf':
             coords = self.positional_encoding(coords)
+        elif self.mode == 'instant-ngp':
+            IB = coords.size(0)
+            IC = coords.size(1)
+            coords = coords.view(-1, 2)
+            coords = self.positional_encoding(coords)            
+            coords = coords.view(IB, IC, -1)
 
         output = self.net(coords, get_subdict(params, 'net'))
         return {'model_in': coords_org, 'model_out': output}

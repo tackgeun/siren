@@ -15,6 +15,9 @@ import torch
 from PIL import Image
 from torch.utils.data import Dataset
 from torchvision.transforms import Resize, Compose, ToTensor, Normalize
+import torchvision
+from torchvision.datasets import VisionDataset
+
 import pdb
 
 def get_mgrid(sidelen, dim=2):
@@ -481,6 +484,19 @@ class Camera(Dataset):
             return self.img
 
 
+class FFHQsample(Dataset):
+    def __init__(self, size):
+        super().__init__()
+        self.img = Image.open("10000.png").resize((size, size), Image.ANTIALIAS)
+        self.img_channels = 3
+
+    def __len__(self):
+        return 1
+
+    def __getitem__(self, idx):
+        return self.img
+
+
 class ImageFile(Dataset):
     def __init__(self, filename):
         super().__init__()
@@ -537,7 +553,7 @@ class CelebA(Dataset):
         return img
 
 class CelebAHQ(Dataset):
-    def __init__(self, split, downsampled=False, resolution=32):
+    def __init__(self, split, downsampled=False, resolution=64):
         # SIZE (128 x 128)
         super().__init__()
         assert split in ['train', 'test'], "Unknown split"
@@ -951,3 +967,59 @@ class CompositeGradients(Dataset):
                    'gradients': self.comp_grads}
 
         return in_dict, gt_dict
+
+
+
+class ImageFolder(VisionDataset):
+    def __init__(self, root, train_list_file, val_list_file, split='train', **kwargs):
+        super().__init__(root, **kwargs)
+
+        self.train_list_file = train_list_file
+        self.val_list_file = val_list_file
+
+        self.split = self._verify_split(split)
+
+        self.loader = torchvision.datasets.folder.default_loader
+        self.extensions = torchvision.datasets.folder.IMG_EXTENSIONS
+
+        if self.split == 'trainval':
+            fname_list = os.listdir(self.root)
+            samples = [self.root.joinpath(fname) for fname in fname_list
+                       if fname.lower().endswith(self.extensions)]
+        else:
+            listfile = self.train_list_file if self.split == 'train' else self.val_list_file
+            with open(listfile, 'r') as f:
+                samples = [os.path.join(self.root, line.strip()) for line in f.readlines()]
+
+        self.samples = samples
+
+    def _verify_split(self, split):
+        if split not in self.valid_splits:
+            msg = "Unknown split {} .".format(split)
+            msg += "Valid splits are {{}}.".format(", ".join(self.valid_splits))
+            raise ValueError(msg)
+        return split
+
+    @property
+    def valid_splits(self):
+        return 'train', 'val', 'trainval'
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, index, with_transform=True):
+        path = self.samples[index]
+        sample = self.loader(path)
+        if self.transforms is not None and with_transform:
+            sample, _ = self.transforms(sample, None)
+        return sample
+
+ROOT_DIR_FFHQ = '/data/nvme2/ffhq-dataset/images256x256'
+ROOT_DATA_LIST = '/data/nvme3/inr-diff/asym-diff/src/datasets'
+
+class FFHQ(ImageFolder):
+    train_list_file = os.path.join(ROOT_DATA_LIST, 'assets/ffhqtrain.txt')
+    val_list_file = os.path.join(ROOT_DATA_LIST, 'assets/ffhqvalidation.txt')
+
+    def __init__(self, root=ROOT_DIR_FFHQ, split='train', **kwargs):
+        super().__init__(root, FFHQ.train_list_file, FFHQ.val_list_file, split, **kwargs)
