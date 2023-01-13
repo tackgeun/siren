@@ -8,9 +8,9 @@ import xxhash
 import torch
 from torch import nn
 from torchmeta.modules import (MetaModule, MetaSequential)
-from torchmeta.modules.utils import get_subdict
+#from torchmeta.modules.utils import get_subdict
 import torch.nn.functional as F
-import tinycudann as tcnn
+#import tinycudann as tcnn
 
 #from torch_butterfly import Butterfly
 #from torch_butterfly.permutation import FixedPermutation, bitreversal_permutation
@@ -588,7 +588,8 @@ class FCBlock(MetaModule):
         #     coords = coords.view(-1, coords.size(2))
         #     coords = coords.contiguous()
 
-        output = self.net(coords, params=get_subdict(params, 'net'))
+        #output = self.net(coords, params=get_subdict(params, 'net'))
+        output = self.net(coords, params=self.net.get_subdict(params, 'net'))
 
         # if self.sparse_type == 'BP':
         #     coords = coords.view(coords_size)
@@ -606,10 +607,12 @@ class FCBlock(MetaModule):
         x = coords.clone().detach().requires_grad_(True)
         activations['input'] = x
         for i, layer in enumerate(self.net):
-            subdict = get_subdict(params, 'net.%d' % i)
+            #subdict = get_subdict(params, 'net.%d' % i)
+            subdict = self.net.get_subdict(params, 'net.%d' % i)
             for j, sublayer in enumerate(layer):
                 if isinstance(sublayer, BatchLinear):
-                    x = sublayer(x, params=get_subdict(subdict, '%d' % j))
+                    #x = sublayer(x, params=get_subdict(subdict, '%d' % j))
+                    x = sublayer(x, params=self.net.get_subdict(subdict, '%d' % j))
                 else:
                     x = sublayer(x)
 
@@ -644,7 +647,7 @@ class SingleBVPNet(MetaModule):
                 "log2_hashmap_size": 15,
                 "base_resolution": 16,
                 "per_level_scale": 1.5
-            }            
+            }
             self.positional_encoding = tcnn.Encoding(in_features, config)
             in_features = 32
         self.image_downsampling = ImageDownsampling(sidelength=kwargs.get('sidelength', None),
@@ -652,7 +655,6 @@ class SingleBVPNet(MetaModule):
 
         self.net = FCBlock(in_features=in_features, out_features=out_features, num_hidden_layers=num_hidden_layers,
                         hidden_features=hidden_features, outermost_linear=True, nonlinearity=type, sparse_matrix=sparse_matrix)
-        #print(self)
 
     def forward(self, model_input, params=None):
         if params is None:
@@ -676,7 +678,9 @@ class SingleBVPNet(MetaModule):
             coords = self.positional_encoding(coords)            
             coords = coords.view(IB, IC, -1)
 
-        output = self.net(coords, get_subdict(params, 'net'))
+        #output = self.net(coords, get_subdict(params, 'net'))
+        output = self.net(coords, self.net.get_subdict(params, 'net'))
+        
         return {'model_in': coords_org, 'model_out': output}
 
     def forward_with_activations(self, model_input):
@@ -769,8 +773,9 @@ class ModulatedFCBlock(MetaModule):
             coords = coords.view(-1, coords.size(2))
             coords = coords.contiguous()
 
-        output = self.net(coords, params=get_subdict(params, 'net'))
-
+        #output = self.net(coords, params=get_subdict(params, 'net'))
+        output = self.net(coords, params=self.net.get_subdict(params, 'net'))
+        
         if self.sparse_type == 'BP':
             coords = coords.view(coords_size)
             coords = coords.contiguous()
@@ -787,10 +792,14 @@ class ModulatedFCBlock(MetaModule):
         x = coords.clone().detach().requires_grad_(True)
         activations['input'] = x
         for i, layer in enumerate(self.net):
-            subdict = get_subdict(params, 'net.%d' % i)
+            #subdict = get_subdict(params, 'net.%d' % i)
+            subdict = self.net.get_subdict(params, 'net.%d' % i)
+            
             for j, sublayer in enumerate(layer):
                 if isinstance(sublayer, BatchLinear):
-                    x = sublayer(x, params=get_subdict(subdict, '%d' % j))
+                    #x = sublayer(x, params=get_subdict(subdict, '%d' % j))
+                    x = sublayer(x, params=self.net.get_subdict(subdict, '%d' % j))
+                    
                 else:
                     x = sublayer(x)
 

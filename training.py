@@ -507,11 +507,14 @@ def autoencoder_train(model, train_dataloader, epochs, lr,
                    np.array(train_psnrs))
 
 
-def memorize(model, batch_data, epochs, lr, loss_fn, clip_grad=False):
+def memorize(model, batch_data, epochs, lr, loss_fn, weight_decay=0.0, clip_grad=False):
 
     PSNR = PeakSignalNoiseRatio()
-    optim = torch.optim.Adam(lr=lr, params=model.parameters())
-
+    if weight_decay > 0.0:
+        optim = torch.optim.AdamW(lr=lr, params=model.parameters(), weight_decay=weight_decay)
+    else:
+        optim = torch.optim.Adam(lr=lr, params=model.parameters())
+    #schedule = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer=optim, T_max=epochs)
     total_steps = 0
     
 
@@ -539,6 +542,7 @@ def memorize(model, batch_data, epochs, lr, loss_fn, clip_grad=False):
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=clip_grad)
 
         optim.step()
+        #schedule.step()
 
     psnr = PSNR(model_output['model_out'][0].cpu() * 0.5 + 0.5, gt['img'][0].cpu() * 0.5 + 0.5)
     

@@ -49,11 +49,13 @@ p.add_argument('--save_images', action='store_true')
 # Dataset
 p.add_argument('--dataset', type=str, default='celeba',
                help='Time interval in seconds until tensorboard summary is saved.')
+p.add_argument('--split', type=str, default='train')
 p.add_argument('--resolution', type=int, default=64)
                
 # Optimization
 p.add_argument('--batch_size', type=int, default=1)
 p.add_argument('--lr', type=float, default=1e-3, help='learning rate. default=5e-5')
+p.add_argument('--weight_decay', type=float, default=0.0)
 p.add_argument('--num_epochs', type=int, default=1000,
                help='Number of epochs to train for.')
 
@@ -69,11 +71,11 @@ opt = p.parse_args()
 image_resolution = (opt.resolution, opt.resolution)
 
 if 'celeba' in opt.dataset.lower():
-    img_dataset = dataio.CelebAHQ(split='train', downsampled=True, resolution=opt.resolution)
+    img_dataset = dataio.CelebAHQ(split=opt.split, downsampled=True, resolution=opt.resolution)
 elif 'ffhq' in opt.dataset.lower():
-    #img_dataset = dataio.FFHQsample(opt.resolution)
     assert opt.resolution == 256
-    img_dataset = dataio.FFHQ(split='train')
+    img_dataset = dataio.FFHQ(split=opt.split)
+
 # coordinate dataset
 coord_dataset = dataio.Implicit2DWrapper(img_dataset, sidelength=opt.resolution, compute_diff='none')
 image_resolution = (opt.resolution, opt.resolution)
@@ -126,7 +128,7 @@ with tqdm(total=len(dataloader)) as pbar:
 
             model.cuda()
             # memorizing loop
-            train_losses, outputs = training.memorize(model, batch_data, opt.num_epochs, lr=opt.lr, loss_fn=loss_fn)
+            train_losses, outputs = training.memorize(model, batch_data, opt.num_epochs, lr=opt.lr, loss_fn=loss_fn, weight_decay=opt.weight_decay)
             
             torch.save(model.state_dict(),
                     os.path.join(checkpoints_dir, f'model{idx}.pth'))
